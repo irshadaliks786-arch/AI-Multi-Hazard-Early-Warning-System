@@ -1,0 +1,362 @@
+{
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "hours"
+            }
+          ]
+        }
+      },
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.3,
+      "position": [0, 0],
+      "id": "f11575bb-08cb-48ee-966a-e6f1318747d7",
+      "name": "Schedule Trigger"
+    },
+    {
+      "parameters": {
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "DisasterSense_Config",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 96206119,
+          "mode": "list",
+          "cachedResultName": "Locations",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=96206119"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [208, 0],
+      "id": "f6453612-90a4-47f6-9232-fc8ef5ff0221",
+      "name": "Get row(s) in sheet",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [416, 0],
+      "id": "b7f818d1-42b9-4884-b981-90dc7ccaf71c",
+      "name": "Loop Over Items"
+    },
+    {
+      "parameters": {
+        "url": "=https://earthquake.usgs.gov/fdsnws/event/1/query?format=geojson&minmagnitude=4.5&latitude={{ $json.lat }}&longitude={{ $json.long }}&maxradiuskm={{ $json.radius_km }}&starttime={{ $now.minus(1,'hours').toISO() }}",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [928, 336],
+      "id": "7f5a66a5-3237-4366-8787-4bde2a09c1ec",
+      "name": "Fetch Earthquakes"
+    },
+    {
+      "parameters": {
+        "url": "=https://firms.modaps.eosdis.nasa.gov/api/area/csv/YOUR_NASA_FIRMS_API_KEY/VIIRS_SNPP_NRT/{{ $json.west }},{{ $json.south }},{{ $json.east }},{{ $json.north }}/1",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1616, 496],
+      "id": "5ca2a289-4143-473f-a677-a298c7b38208",
+      "name": "Fetch Fire Data"
+    },
+    {
+      "parameters": {
+        "url": "=https://api.openweathermap.org/data/2.5/weather?lat={{ $json.lat }}&lon={{ $json.long }}&appid=YOUR_OPENWEATHERMAP_API_KEY&units=metric",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.4,
+      "position": [1216, 400],
+      "id": "be69f43e-ae81-4b2f-bbe7-1e2707f8fa3d",
+      "name": "Fetch Weather Alerts"
+    },
+    {
+      "parameters": {
+        "jsCode": "const lat = parseFloat($input.item.json.lat);\nconst lon = parseFloat($input.item.json.long);\nconst radiusKm = parseFloat($input.item.json.radius_km);\n\n// 1 degree latitude ≈ 111 km\nconst offset = radiusKm / 111;\n\nconst west = lon - offset;\nconst east = lon + offset;\nconst south = lat - offset;\nconst north = lat + offset;\n\nreturn {\n  json: {\n    ...$input.item.json,\n    west: west.toFixed(4),\n    south: south.toFixed(4),\n    east: east.toFixed(4),\n    north: north.toFixed(4)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1456, 480],
+      "id": "e7c57c61-eb53-4eef-af74-4e35455deedf",
+      "name": "Calculate Bounding Box"
+    },
+    {
+      "parameters": {
+        "mode": "combine",
+        "combineBy": "combineByPosition",
+        "numberInputs": 3,
+        "options": {
+          "includeUnpaired": true
+        }
+      },
+      "type": "n8n-nodes-base.merge",
+      "typeVersion": 3.2,
+      "position": [704, 0],
+      "id": "3fc90af0-b6ee-4de8-85f4-15a93cb82e0f",
+      "name": "Merge"
+    },
+    {
+      "parameters": {
+        "jsCode": "const item = $input.item.json;\n\n// ===== 1. EARTHQUAKE SCORING =====\nlet earthquakeScore = 0;\nlet earthquakeDetails = \"None\";\nif (item.features && item.features.length > 0) {\n  // sabse bada magnitude wala event le\n  const strongest = item.features.reduce((max, f) =>\n    f.properties.mag > max.properties.mag ? f : max\n  );\n  const mag = strongest.properties.mag;\n  earthquakeScore = Math.min(10, (mag / 7) * 10); // mag 7 = score 10\n  earthquakeDetails = `Magnitude ${mag} at ${strongest.properties.place || 'nearby'}`;\n}\n\n// ===== 2. WEATHER SCORING =====\nlet weatherScore = 0;\nlet weatherDetails = \"Normal\";\nif (item.wind && item.main) {\n  const windSpeed = item.wind.speed || 0; // m/s\n  const condition = item.weather && item.weather[0] ? item.weather[0].main : \"\";\n  const rain1h = item.rain ? item.rain[\"1h\"] || 0 : 0;\n\n  let windScore = Math.min(10, (windSpeed / 20) * 10); // 20 m/s = score 10\n  let rainScore = Math.min(10, (rain1h / 30) * 10); // 30mm/hr = score 10\n  let stormBonus = (condition === \"Thunderstorm\") ? 4 : 0;\n\n  weatherScore = Math.min(10, Math.max(windScore, rainScore) + stormBonus);\n  weatherDetails = `${condition}, wind ${windSpeed}m/s, rain ${rain1h}mm`;\n}\n\n// ===== 3. FIRE SCORING =====\nlet fireScore = 0;\nlet fireDetails = \"None detected\";\nif (item.data && typeof item.data === \"string\") {\n  const lines = item.data.trim().split(\"\\n\").filter(l => l.trim().length > 0);\n  const fireCount = Math.max(0, lines.length - 1); // minus header row\n  fireScore = Math.min(10, fireCount * 2); // har detection +2, max 10\n  if (fireCount > 0) fireDetails = `${fireCount} fire detection(s)`;\n}\n\n// ===== 4. WEIGHTED FINAL RISK SCORE =====\nconst riskScore = (\n  0.4 * earthquakeScore +\n  0.35 * weatherScore +\n  0.25 * fireScore\n).toFixed(1);\n\nreturn {\n  json: {\n    city: item.city || item.name || \"Unknown\",\n    timestamp: new Date().toISOString(),\n    earthquake_score: earthquakeScore.toFixed(1),\n    earthquake_details: earthquakeDetails,\n    weather_score: weatherScore.toFixed(1),\n    weather_details: weatherDetails,\n    fire_score: fireScore.toFixed(1),\n    fire_details: fireDetails,\n    risk_score: parseFloat(riskScore)\n  }\n};"
+      },
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [864, 16],
+      "id": "0703e688-b924-496a-839f-dbb9085c878a",
+      "name": "Calculate Risk Score"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 3
+          },
+          "conditions": [
+            {
+              "id": "3391ff21-3e92-47e4-991e-840384a37fc0",
+              "leftValue": "={{ $json.risk_score }}",
+              "rightValue": 1.5,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.3,
+      "position": [1040, 32],
+      "id": "97de5fb2-fc27-4cf4-8b5b-545a7fa42f86",
+      "name": "Check Risk Threshold"
+    },
+    {
+      "parameters": {
+        "chatId": "YOUR_TELEGRAM_CHAT_ID",
+        "text": "=🚨 **HIGH RISK DISASTER ALERT**\n\n📍 **Location:** {{ $json.city }}\n\n📊 **Risk Score:** **{{ $json.risk_score }}/10** (High)\n\n**Hazard Summary**\n🌍 Earthquake: {{ $json.earthquake_details }}\n\n🌦️ Weather: {{ $json.weather_details }}\n\n🔥 Fire Activity: {{ $json.fire_details }}\n\n🕒 **Detected At:** {{ $json.timestamp }}\n\n⚠️ The DisasterSense AI Monitoring System has identified a high-risk situation for this location based on real-time hazard analysis. Please stay alert, monitor official advisories, and take necessary precautions if required.\n\n*DisasterSense • AI-Powered Multi-Hazard Early Warning System*\n",
+        "additionalFields": {}
+      },
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1536, 224],
+      "id": "19765a79-d461-485a-8cee-12e00945a64a",
+      "name": "Send a text message",
+      "webhookId": "1dc945c3-cb61-4b95-b189-800249f30ed7",
+      "credentials": {
+        "telegramApi": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Telegram account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "sendTo": "YOUR_EMAIL@example.com",
+        "subject": "=🚨 Disaster Risk Alert: {{ $json.city }} - Score {{ $json.risk_score }}/10",
+        "message": "=<h2>🚨 Disaster Risk Alert</h2>\n\n<p>Dear Recipient,</p>\n\n<p>\nThis is an automated notification from the\n<b>DisasterSense Monitoring System</b>.\n</p>\n\n<p>A high-risk disaster event has been detected.</p>\n\n<table border=\"1\" cellpadding=\"8\" cellspacing=\"0\">\n<tr>\n<td><b>Location</b></td>\n<td>{{ $json.city }}</td>\n</tr>\n\n<tr>\n<td><b>Risk Score</b></td>\n<td>{{ $json.risk_score }}/10</td>\n</tr>\n\n<tr>\n<td><b>Alert Level</b></td>\n<td>High</td>\n</tr>\n\n<tr>\n<td><b>Time</b></td>\n<td>{{ $json.timestamp }}</td>\n</tr>\n</table>\n\n<h3>Risk Assessment</h3>\n\n<ul>\n<li><b>🌍 Earthquake:</b> {{ $json.earthquake_details }}</li>\n<li><b>🌦 Weather:</b> {{ $json.weather_details }}</li>\n<li><b>🔥 Fire:</b> {{ $json.fire_details }}</li>\n</ul>\n\n<p>\nPlease monitor the situation and follow official advisories if necessary.\n</p>\n\n<hr>\n\n<p>\nRegards,<br>\n<b>DisasterSense</b><br>\nAI-Powered Multi-Hazard Early Warning System\n</p>\n",
+        "options": {}
+      },
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.2,
+      "position": [1328, 288],
+      "id": "6d5d1fe6-3c07-4069-ab9f-cd56db28c38c",
+      "name": "Send a message",
+      "webhookId": "d7ba4249-e0f7-4899-80c6-d85e0901adf4",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Gmail account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "DisasterSense_Config",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 386005850,
+          "mode": "list",
+          "cachedResultName": "History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=386005850"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "city": "={{ $json.city }}",
+            "hazard_type": "Combined",
+            "severity": "={{ $json.risk_score >= 7 ? \"High\" : ($json.risk_score >= 4 ? \"Medium\" : \"Low\") }}",
+            "risk_score": "={{ $json.risk_score }}",
+            "alert_sent": "no",
+            "timestamps": "={{ $json.timestamp }}"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {"id": "timestamps", "displayName": "timestamps", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false},
+            {"id": "city", "displayName": "city", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "hazard_type", "displayName": "hazard_type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "severity", "displayName": "severity", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "risk_score", "displayName": "risk_score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "alert_sent", "displayName": "alert_sent", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true}
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1408, 64],
+      "id": "cbaf8958-2bf0-4ae4-96fc-a13810de5775",
+      "name": "Append row in sheet1",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "operation": "append",
+        "documentId": {
+          "__rl": true,
+          "value": "YOUR_GOOGLE_SHEET_ID",
+          "mode": "list",
+          "cachedResultName": "DisasterSense_Config",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit?usp=drivesdk"
+        },
+        "sheetName": {
+          "__rl": true,
+          "value": 386005850,
+          "mode": "list",
+          "cachedResultName": "History",
+          "cachedResultUrl": "https://docs.google.com/spreadsheets/d/YOUR_GOOGLE_SHEET_ID/edit#gid=386005850"
+        },
+        "columns": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "timestamps": "={{ $json.timestamp }}",
+            "city": "={{ $json.city }}",
+            "hazard_type": "Combined",
+            "severity": "={{ $json.risk_score >= 7 ? \"High\" : ($json.risk_score >= 4 ? \"Medium\" : \"Low\") }}",
+            "risk_score": "={{ $json.risk_score }}",
+            "alert_sent": "yes"
+          },
+          "matchingColumns": [],
+          "schema": [
+            {"id": "timestamps", "displayName": "timestamps", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "city", "displayName": "city", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "hazard_type", "displayName": "hazard_type", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "severity", "displayName": "severity", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "risk_score", "displayName": "risk_score", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true},
+            {"id": "alert_sent", "displayName": "alert_sent", "required": false, "defaultMatch": false, "display": true, "type": "string", "canBeUsedToMatch": true, "removed": false}
+          ],
+          "attemptToConvertTypes": false,
+          "convertFieldsToString": false
+        },
+        "options": {}
+      },
+      "type": "n8n-nodes-base.googleSheets",
+      "typeVersion": 4.7,
+      "position": [1216, 128],
+      "id": "5a9d5327-1f3b-486d-823a-ccba8240a282",
+      "name": "Append row in sheet2",
+      "credentials": {
+        "googleSheetsOAuth2Api": {
+          "id": "YOUR_CREDENTIAL_ID",
+          "name": "Google Sheets account"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [[{"node": "Get row(s) in sheet", "type": "main", "index": 0}]]
+    },
+    "Get row(s) in sheet": {
+      "main": [[{"node": "Loop Over Items", "type": "main", "index": 0}]]
+    },
+    "Loop Over Items": {
+      "main": [
+        [],
+        [
+          {"node": "Fetch Earthquakes", "type": "main", "index": 0},
+          {"node": "Fetch Weather Alerts", "type": "main", "index": 0},
+          {"node": "Calculate Bounding Box", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "Fetch Earthquakes": {
+      "main": [[{"node": "Merge", "type": "main", "index": 0}]]
+    },
+    "Fetch Fire Data": {
+      "main": [[{"node": "Merge", "type": "main", "index": 2}]]
+    },
+    "Fetch Weather Alerts": {
+      "main": [[{"node": "Merge", "type": "main", "index": 1}]]
+    },
+    "Calculate Bounding Box": {
+      "main": [[{"node": "Fetch Fire Data", "type": "main", "index": 0}]]
+    },
+    "Merge": {
+      "main": [[{"node": "Calculate Risk Score", "type": "main", "index": 0}]]
+    },
+    "Calculate Risk Score": {
+      "main": [[{"node": "Check Risk Threshold", "type": "main", "index": 0}]]
+    },
+    "Check Risk Threshold": {
+      "main": [
+        [
+          {"node": "Send a text message", "type": "main", "index": 0},
+          {"node": "Send a message", "type": "main", "index": 0},
+          {"node": "Append row in sheet1", "type": "main", "index": 0}
+        ],
+        [
+          {"node": "Append row in sheet2", "type": "main", "index": 0}
+        ]
+      ]
+    },
+    "Append row in sheet1": {
+      "main": [[{"node": "Loop Over Items", "type": "main", "index": 0}]]
+    },
+    "Append row in sheet2": {
+      "main": [[{"node": "Loop Over Items", "type": "main", "index": 0}]]
+    }
+  },
+  "pinData": {},
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "YOUR_INSTANCE_ID"
+  }
+}
